@@ -1,7 +1,22 @@
 import numpy as np
-
+from pathlib import Path
+from stable_baselines3 import PPO
 
 class DroneFlightController:
+    def __init__(self):
+        model_path = Path(__file__).parent / "ppo_policy.zip"
+        self.model = PPO.load(model_path.with_suffix(""))
+    
+    def act(self, observation):
+        action, _ = self.model.predict(observation, deterministic=True)
+        return action
+    
+    def reset(self):
+        pass
+
+
+
+class _DroneFlightController:
     """
     Swarm Subnet 124 - Autonomous Drone Flight Controller
     
