@@ -7,6 +7,7 @@ import numpy as np
 
 from swarm.constants import (
     BENCHMARK_SCREENING_SEED_COUNT,
+    BENCHMARK_VERSION,
     MAX_INFLIGHT_SEED_UPLOADS,
     SCREENING_TEMPLATE,
     SIM_DT,
@@ -286,22 +287,40 @@ async def _run_streaming_phase(
 async def _run_screening(
     self, uid: int, model_path: Path, reeval: bool = False,
     task_id: Optional[int] = None,
-) -> Tuple[float, List[float], Dict[str, List[float]], Optional[str]]:
+    *,
+    seeds_from: int = 0,
+    seeds_to: Optional[int] = None,
+    cancel_flag: Optional[asyncio.Event] = None,
+    early_fail_rules: Optional[Dict[str, Any]] = None,
+) -> Tuple[float, List[float], Dict[str, List[float]], Optional[str], bool]:
     """Run screening seeds and stream per-seed scores.
 
-    Returns (avg, all, per_type, cancel_reason).
+    Returns ``(avg, all_scores, per_type, cancel_reason, early_failed)``.
 
-    When ``reeval`` is True the heartbeat labels the active task as REEVAL and a
-    backend authorization check runs before each streaming chunk so a stale
-    re-eval can be halted mid-flight.
+    ``seeds_from`` / ``seeds_to`` carve a sub-range out of the epoch's
+    full screening seed list — used for resuming an early-failed task.
+    ``cancel_flag`` is set by the SSE listener; when set the streaming
+    phase aborts at the next chunk boundary. ``early_fail_rules`` follows
+    the backend's payload shape: ``{"threshold": float, "checkpoints":
+    {"50": 0.50, "100": 0.70, "150": 0.85}}``.
     """
-    screening_seeds = self.seed_manager.get_screening_seeds()
+    full_seeds = self.seed_manager.get_screening_seeds()
+    upper = seeds_to if seeds_to is not None else len(full_seeds)
+    upper = max(seeds_from, min(upper, len(full_seeds)))
+    screening_seeds = full_seeds[seeds_from:upper]
     total_seeds = len(screening_seeds)
+    # Cumulative-progress framing for the heartbeat: report the full
+    # screening range as total and the resume offset as already-done so
+    # the dashboard renders honest progress (e.g. 130/200) instead of
+    # 0/(remaining-slice) on resume.
+    heartbeat_total = upper
+    progress_offset = seeds_from
     epoch = self.seed_manager.epoch_number
 
-    template_cycle = (
-        SCREENING_TEMPLATE * ((total_seeds // len(SCREENING_TEMPLATE)) + 1)
-    )[:total_seeds]
+    full_template = (
+        SCREENING_TEMPLATE * ((len(full_seeds) // len(SCREENING_TEMPLATE)) + 1)
+    )[: len(full_seeds)]
+    template_cycle = full_template[seeds_from:upper]
     screening_tasks: List = []
     for seed, slot in zip(screening_seeds, template_cycle):
         try:
@@ -315,6 +334,16 @@ async def _run_screening(
         except Exception as e:
             bt.logging.warning(f"Failed to create screening task for seed {seed}: {e}")
             screening_tasks.append(None)
+
+    early_fail_state = {"triggered": False, "at": None}
+    checkpoint_thresholds: Dict[int, float] = {}
+    if early_fail_rules:
+        threshold = float(early_fail_rules.get("threshold", 0.0))
+        for raw_n, raw_factor in (early_fail_rules.get("checkpoints") or {}).items():
+            try:
+                checkpoint_thresholds[int(raw_n)] = float(raw_factor) * threshold
+            except (TypeError, ValueError):
+                continue
 
     tracker_call(
         self,
@@ -330,34 +359,49 @@ async def _run_screening(
         matched = next((item for item in hb_queue if int(item.get("uid", -1)) == uid), None)
         if matched is not None:
             decision_version = matched.get("backend_decision_version")
-    active_task = {"uid": uid, "phase": "REEVAL"} if reeval else None
+    active_task = {
+        "uid": uid,
+        "phase": "REEVAL" if reeval else "SCREENING",
+        "assignment_id": task_id,
+        "epoch_number": epoch,
+        "benchmark_version": BENCHMARK_VERSION,
+    }
     hb.start(
         "evaluating_screening",
         uid,
-        total_seeds,
+        heartbeat_total,
         queue=hb_queue,
         active_task=active_task,
         backend_decision_version=decision_version,
+        progress_offset=progress_offset,
     )
 
     def _on_chunk(**info) -> None:
+        evaluated = int(info["evaluated"])
+        running_avg = float(info["running_avg"])
         tracker_call(
             self,
             "mark_screening_progress",
             uid=int(uid),
-            progress=int(info["evaluated"]),
+            progress=evaluated,
             total_seeds=int(info["total"]),
-            running_median=float(info["running_avg"]),
-            note=f"checkpoint {info['evaluated']}/{info['total']}",
+            running_median=running_avg,
+            note=f"checkpoint {evaluated}/{info['total']}",
         )
+        # Early-fail: at each declared checkpoint, abort if the running
+        # average is below the per-checkpoint threshold the backend set.
+        absolute = seeds_from + evaluated
+        floor = checkpoint_thresholds.get(absolute)
+        if floor is not None and running_avg < floor:
+            early_fail_state["triggered"] = True
+            early_fail_state["at"] = absolute
 
-    re_authorize: Optional[Callable[[], Awaitable[Dict[str, Any]]]] = None
-    if reeval:
-        async def _reauthorize_reeval() -> dict:
-            return await self.backend_api.authorize_task(
-                uid, "REEVAL", epoch_number=epoch,
-            )
-        re_authorize = _reauthorize_reeval
+    def _should_stop() -> Optional[str]:
+        if cancel_flag is not None and cancel_flag.is_set():
+            return "cancel_flag_set"
+        if early_fail_state["triggered"]:
+            return f"early_fail_at_{early_fail_state['at']}"
+        return hb.should_stop()
 
     try:
         all_scores, all_per_type, _details, cancel_reason = await _run_streaming_phase(
@@ -366,13 +410,12 @@ async def _run_screening(
             model_path,
             screening_seeds,
             phase_description="screening",
-            seed_offset=0,
+            seed_offset=seeds_from,
             epoch_number=epoch,
             hb=hb,
             task_id=task_id,
             pre_built_tasks=screening_tasks,
-            re_authorize=re_authorize,
-            should_stop=hb.should_stop,
+            should_stop=_should_stop,
             on_chunk_complete=_on_chunk,
         )
     finally:
@@ -397,12 +440,15 @@ async def _run_screening(
             f"Screening cancelled for UID {uid} after "
             f"{len(all_scores)}/{total_seeds} seeds: {cancel_reason}"
         )
-    return avg_score, all_scores, all_per_type, cancel_reason
+    return avg_score, all_scores, all_per_type, cancel_reason, early_fail_state["triggered"]
 
 
 async def _run_full_benchmark(
     self, uid: int, model_path: Path, seeds: Optional[List[int]] = None,
     reeval: bool = False, task_id: Optional[int] = None,
+    *,
+    cancel_flag: Optional[asyncio.Event] = None,
+    seeds_from: Optional[int] = None,
 ) -> Tuple[float, Dict[str, float], List[float], Dict[str, List[float]], Optional[str]]:
     """Run full benchmark. Uses benchmark seeds by default, or custom seeds if provided.
 
@@ -413,8 +459,69 @@ async def _run_full_benchmark(
     champion re-eval can be halted mid-flight (epoch rollover, admin override,
     wrong-model edge cases).
     """
-    benchmark_seeds = seeds if seeds is not None else self.seed_manager.get_benchmark_seeds()
-    seed_offset = 0 if seeds is not None else BENCHMARK_SCREENING_SEED_COUNT
+    if seeds is None:
+        # REEVAL covers all 1000 seeds; benchmark covers only 200..999.
+        # Caller signals REEVAL by passing seeds_from < 200.
+        if seeds_from is not None and seeds_from < BENCHMARK_SCREENING_SEED_COUNT:
+            benchmark_seeds = self.seed_manager.seeds[seeds_from:]
+            seed_offset = seeds_from
+            heartbeat_total = len(self.seed_manager.seeds)
+            progress_offset = seeds_from
+        elif seeds_from is not None and seeds_from > BENCHMARK_SCREENING_SEED_COUNT:
+            full_benchmark = self.seed_manager.get_benchmark_seeds()
+            offset = seeds_from - BENCHMARK_SCREENING_SEED_COUNT
+            benchmark_seeds = full_benchmark[offset:]
+            seed_offset = seeds_from
+            heartbeat_total = len(full_benchmark)
+            progress_offset = offset
+        else:
+            benchmark_seeds = self.seed_manager.get_benchmark_seeds()
+            seed_offset = BENCHMARK_SCREENING_SEED_COUNT
+            heartbeat_total = len(benchmark_seeds)
+            progress_offset = 0
+    else:
+        benchmark_seeds = seeds
+        seed_offset = 0
+        heartbeat_total = len(seeds)
+        progress_offset = 0
+
+    # REEVAL of the champion crosses the screening range. Use the same
+    # template there as a new submission's screening pass so both models
+    # are graded on identical slots; fall through to random_task for the
+    # benchmark range and for non-REEVAL callers.
+    pre_built_tasks: Optional[List] = None
+    if (
+        reeval
+        and seeds is None
+        and seeds_from is not None
+        and seeds_from < BENCHMARK_SCREENING_SEED_COUNT
+    ):
+        full_screening_seeds = self.seed_manager.get_screening_seeds()
+        full_template = (
+            SCREENING_TEMPLATE * ((len(full_screening_seeds) // len(SCREENING_TEMPLATE)) + 1)
+        )[: len(full_screening_seeds)]
+        pre_built_tasks = []
+        for i, seed in enumerate(benchmark_seeds):
+            abs_idx = seeds_from + i
+            try:
+                if abs_idx < BENCHMARK_SCREENING_SEED_COUNT:
+                    slot = full_template[abs_idx]
+                    task = screening_task(
+                        sim_dt=SIM_DT, seed=seed,
+                        challenge_type=slot["challenge_type"],
+                        distance_range=slot["distance_range"],
+                        goal_height_range=slot.get("goal_height_range"),
+                        moving_platform=slot["moving_platform"],
+                    )
+                else:
+                    task = random_task(sim_dt=SIM_DT, seed=seed)
+            except Exception as e:
+                bt.logging.warning(
+                    f"Failed to create REEVAL task for seed {seed} idx {abs_idx}: {e}"
+                )
+                task = None
+            pre_built_tasks.append(task)
+
     total_seeds = len(benchmark_seeds)
     note = "full benchmark" if seeds is None else "custom seeds"
     epoch = self.seed_manager.epoch_number
@@ -434,14 +541,21 @@ async def _run_full_benchmark(
         matched = next((item for item in hb_queue if int(item.get("uid", -1)) == uid), None)
         if matched is not None:
             decision_version = matched.get("backend_decision_version")
-    active_task = {"uid": uid, "phase": "REEVAL"} if reeval else None
+    active_task = {
+        "uid": uid,
+        "phase": "REEVAL" if reeval else "BENCHMARK",
+        "assignment_id": task_id,
+        "epoch_number": epoch,
+        "benchmark_version": BENCHMARK_VERSION,
+    }
     hb.start(
         "evaluating_benchmark",
         uid,
-        total_seeds,
+        heartbeat_total,
         queue=hb_queue,
         active_task=active_task,
         backend_decision_version=decision_version,
+        progress_offset=progress_offset,
     )
 
     def _on_chunk(**info) -> None:
@@ -454,13 +568,10 @@ async def _run_full_benchmark(
             note=f"checkpoint {info['evaluated']}/{info['total']}",
         )
 
-    re_authorize: Optional[Callable[[], Awaitable[Dict[str, Any]]]] = None
-    if reeval:
-        async def _reauthorize_reeval() -> dict:
-            return await self.backend_api.authorize_task(
-                uid, "REEVAL", epoch_number=epoch,
-            )
-        re_authorize = _reauthorize_reeval
+    def _should_stop() -> Optional[str]:
+        if cancel_flag is not None and cancel_flag.is_set():
+            return "cancel_flag_set"
+        return hb.should_stop()
 
     try:
         all_scores, per_type_raw, _details, cancel_reason = await _run_streaming_phase(
@@ -473,8 +584,8 @@ async def _run_full_benchmark(
             epoch_number=epoch,
             hb=hb,
             task_id=task_id,
-            re_authorize=re_authorize,
-            should_stop=hb.should_stop,
+            pre_built_tasks=pre_built_tasks,
+            should_stop=_should_stop,
             on_chunk_complete=_on_chunk,
         )
     finally:

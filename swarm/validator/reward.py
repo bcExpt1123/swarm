@@ -66,6 +66,7 @@ from swarm.constants import (
     REWARD_W_TIME,
     SAFETY_DISTANCE_DANGER,
     SAFETY_DISTANCE_SAFE,
+    SAFETY_DISTANCE_SAFE_BY_TYPE,
     SPEED_LIMIT,
     TYPE_6_SAFETY_DISTANCE_SAFE,
     LANDING_MAX_VZ,
@@ -73,10 +74,6 @@ from swarm.constants import (
     LANDING_MAX_TILT_RAD,
     LANDING_STABLE_SEC
 )
-
-SAFETY_DISTANCE_SAFE_BY_TYPE = {
-    6: TYPE_6_SAFETY_DISTANCE_SAFE,
-}
 
 __all__ = ["flight_reward"]
 

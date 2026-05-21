@@ -1,6 +1,7 @@
 # swarm/envs/moving_drone.py
 from __future__ import annotations
 
+import functools
 import math
 import os
 import numpy as np
@@ -31,12 +32,26 @@ from swarm.constants import (
     PLATFORM_AVOIDANCE_ENABLED, PLATFORM_STEER_ANGLES, PLATFORM_MIN_STEP_M,
     LANDING_PLATFORM_RADIUS,
     SAFETY_DISTANCE_SAFE,
+    SAFETY_DISTANCE_SAFE_BY_TYPE,
+    LANDING_FLOOR_MAX_HEIGHT,
+    LANDING_COLUMN_PADDING,
+    LANDING_ALTITUDE_BUFFER,
     START_PLATFORM_TAKEOFF_BUFFER,
     LANDING_MAX_VZ, LANDING_MAX_VXY_REL, LANDING_MAX_TILT_RAD, LANDING_STABLE_SEC,
     CULL_VISUAL_RADIUS, CULL_PHYSICS_RADIUS, CULL_INTERVAL_STEPS,
     CULL_MIN_AABB_SPAN, CULL_MIN_FACES, CULL_MIN_TOTAL_FACES,
     SOLVER_ITERATIONS, SOLVER_MIN_ISLAND_SIZE,
 )
+
+
+@functools.lru_cache(maxsize=4096)
+def _count_obj_faces_cached(path: str, mtime_ns: int, size: int) -> int:
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return 0
+    return data.count(b"\nf ") + (1 if data.startswith(b"f ") else 0)
 
 
 class MovingDroneAviary(BaseRLAviary):
@@ -165,6 +180,8 @@ class MovingDroneAviary(BaseRLAviary):
         self._cull_phys_disabled = set()
         self._cull_step_counter = 0
         self._cull_enabled = False
+
+        self._cached_proj_matrix = None
 
     # --------------------------------------------------------------------- #
     # 2. low‑level helpers
@@ -427,15 +444,18 @@ class MovingDroneAviary(BaseRLAviary):
             physicsClientId=cli
         )
         
-        aspect = self.IMG_RES[0] / self.IMG_RES[1]
-        DRONE_CAM_PRO = p.computeProjectionMatrixFOV(
-            fov=self._fov,
-            aspect=aspect,
-            nearVal=0.05,
-            farVal=DEPTH_FAR,
-            physicsClientId=cli
-        )
-        
+        DRONE_CAM_PRO = self._cached_proj_matrix
+        if DRONE_CAM_PRO is None:
+            aspect = self.IMG_RES[0] / self.IMG_RES[1]
+            DRONE_CAM_PRO = p.computeProjectionMatrixFOV(
+                fov=self._fov,
+                aspect=aspect,
+                nearVal=0.05,
+                farVal=DEPTH_FAR,
+                physicsClientId=cli
+            )
+            self._cached_proj_matrix = DRONE_CAM_PRO
+
         seg_flag = p.ER_NO_SEGMENTATION_MASK
         depth_only_flag = getattr(p, "ER_DEPTH_ONLY", None)
         if depth_only_flag is not None:
@@ -458,9 +478,7 @@ class MovingDroneAviary(BaseRLAviary):
     def _get_altitude_distance(self) -> float:
         """Cast single ray downward for ground/altitude detection."""
         cli = getattr(self, "CLIENT", 0)
-        uid = self.DRONE_IDS[0]
-        pos, _ = p.getBasePositionAndOrientation(uid, physicsClientId=cli)
-        pos = np.asarray(pos, dtype=float)
+        pos = self.pos[0]
 
         ray_origin_offset = DRONE_HULL_RADIUS - ALTITUDE_RAY_INSET
         start = [pos[0], pos[1], pos[2] - ray_origin_offset]
@@ -584,14 +602,11 @@ class MovingDroneAviary(BaseRLAviary):
     # --------------------------------------------------------------------- #
     @staticmethod
     def _count_mesh_faces(path: str) -> int:
-        if not os.path.exists(path):
+        try:
+            st = os.stat(path)
+        except OSError:
             return 0
-        count = 0
-        with open(path) as f:
-            for line in f:
-                if line[0:2] == "f ":
-                    count += 1
-        return count
+        return _count_obj_faces_cached(path, st.st_mtime_ns, st.st_size)
 
     def _build_cull_targets(self) -> None:
         """Scan scene bodies and build the cull-target list."""
@@ -685,6 +700,59 @@ class MovingDroneAviary(BaseRLAviary):
         self._cull_vis_hidden.clear()
         self._cull_phys_disabled.clear()
 
+    def _is_landing_floor_body(self, body_uid: int, drone_pos) -> bool:
+        """Whether ``body_uid`` is the supporting floor under the landing platform
+        and should be ignored by safety scoring during the final descent.
+
+        Suppression is geometry-only and only fires when every gate passes:
+        the map allows a low platform, the platform is genuinely low, the body
+        sits below the platform within safe distance, the body is flat, the
+        body's AABB overlaps the landing column, the drone is in the landing
+        column, and the drone is at landing altitude.
+        """
+        challenge_type = int(getattr(self.task, "challenge_type", 0))
+        if challenge_type not in (1, 4, 5, 6):
+            return False
+
+        safe = SAFETY_DISTANCE_SAFE_BY_TYPE.get(challenge_type, SAFETY_DISTANCE_SAFE)
+        platform_pos = self._current_platform_pos
+        if platform_pos is None:
+            platform_pos = self.GOAL_POS
+        if platform_pos is None:
+            return False
+        if platform_pos[2] >= safe:
+            return False
+
+        cli = getattr(self, "CLIENT", 0)
+        mn, mx = p.getAABB(body_uid, physicsClientId=cli)
+
+        if mx[2] >= platform_pos[2]:
+            return False
+        if (platform_pos[2] - mx[2]) >= safe:
+            return False
+        if (mx[2] - mn[2]) > LANDING_FLOOR_MAX_HEIGHT:
+            return False
+
+        landing_r = LANDING_PLATFORM_RADIUS + DRONE_HULL_RADIUS + LANDING_COLUMN_PADDING
+        landing_r_sq = landing_r * landing_r
+
+        cx = min(max(platform_pos[0], mn[0]), mx[0])
+        cy = min(max(platform_pos[1], mn[1]), mx[1])
+        body_dx = platform_pos[0] - cx
+        body_dy = platform_pos[1] - cy
+        if body_dx * body_dx + body_dy * body_dy > landing_r_sq:
+            return False
+
+        drone_dx = drone_pos[0] - platform_pos[0]
+        drone_dy = drone_pos[1] - platform_pos[1]
+        if drone_dx * drone_dx + drone_dy * drone_dy > landing_r_sq:
+            return False
+
+        if drone_pos[2] > platform_pos[2] + safe + LANDING_ALTITUDE_BUFFER:
+            return False
+
+        return True
+
     def _update_min_clearance(self) -> None:
         """Update minimum obstacle clearance for the episode."""
         if self._collision:
@@ -706,11 +774,14 @@ class MovingDroneAviary(BaseRLAviary):
         overlapping = p.getOverlappingObjects(search_min, search_max, physicsClientId=cli)
 
         if overlapping:
+            drone_pos = self.pos[0, :]
             checked = set()
             for body_uid, _link_idx in overlapping:
                 if body_uid in excluded or body_uid in checked:
                     continue
                 checked.add(body_uid)
+                if self._is_landing_floor_body(body_uid, drone_pos):
+                    continue
 
                 closest = p.getClosestPoints(
                     bodyA=drone_id,
@@ -928,6 +999,7 @@ class MovingDroneAviary(BaseRLAviary):
             start=self.task.start,
             goal=self.task.goal,
             challenge_type=self.task.challenge_type,
+            moving_platform=getattr(self.task, "moving_platform", False),
         )
 
         if len(result) >= 6:
@@ -1070,37 +1142,23 @@ class MovingDroneAviary(BaseRLAviary):
         depth = self._process_depth(depth_raw)
 
         state_vec = self._getDroneStateVector(0)
-        obs_12 = np.hstack([
-            state_vec[0:3],
-            state_vec[7:10],
-            state_vec[10:13],
-            state_vec[13:16]
-        ]).astype(np.float32)
 
-        state_full = np.array([obs_12], dtype=np.float32)
+        action_dim = self.action_buffer[0].shape[1] if self.ACTION_BUFFER_SIZE > 0 else 0
+        base_len = 12 + self.ACTION_BUFFER_SIZE * action_dim
+        state_full = np.empty(base_len + 1 + 3, dtype=np.float32)
+
+        state_full[0:3] = state_vec[0:3]
+        state_full[3:6] = state_vec[7:10]
+        state_full[6:9] = state_vec[10:13]
+        state_full[9:12] = state_vec[13:16]
+
+        offset = 12
         for i in range(self.ACTION_BUFFER_SIZE):
-            state_full = np.hstack([state_full, np.array([self.action_buffer[i][0, :]])])
-        state_full = state_full.flatten().astype(np.float32)
+            state_full[offset:offset + action_dim] = self.action_buffer[i][0, :]
+            offset += action_dim
 
-        altitude = self._get_altitude_distance() / MAX_RAY_DISTANCE
-        state_full = np.append(state_full, altitude).astype(np.float32)
-
-        drone_pos = state_vec[0:3]
-        search_area_vector = (self._search_area_center - drone_pos).astype(np.float32)
-        state_full = np.append(state_full, search_area_vector).astype(np.float32)
-
-        actual_state_dim = state_full.shape[0]
-        if actual_state_dim != self._state_dim:
-            self._state_dim = actual_state_dim
-            self.observation_space = spaces.Dict({
-                "depth": self.observation_space["depth"],
-                "state": spaces.Box(
-                    low=-np.inf,
-                    high=np.inf,
-                    shape=(actual_state_dim,),
-                    dtype=np.float32
-                ),
-            })
+        state_full[base_len] = self._get_altitude_distance() / MAX_RAY_DISTANCE
+        state_full[base_len + 1:base_len + 4] = self._search_area_center - state_vec[0:3]
 
         return {
             "depth": depth,

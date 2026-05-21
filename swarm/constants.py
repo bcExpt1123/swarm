@@ -57,11 +57,18 @@ PROP_EFF = 0.60                         # Propeller efficiency coefficient
 # MODEL & AI EVALUATION
 # =============================================================================
 
-# Model size and validation limits
-MAX_MODEL_BYTES = 50 * 1024 * 1024      # Maximum compressed model size (50 MiB)
+# Model size and validation limits — sourced from submission_policy so the
+# backend and validator agree on the same ceiling.
+from swarm.core.submission_policy import MAX_UNCOMPRESSED_BYTES as _POLICY_MAX_BYTES
+
+MAX_MODEL_BYTES = _POLICY_MAX_BYTES
 EVAL_TIMEOUT_SEC = 120.0                # Model evaluation subprocess timeout (seconds)
 
 # Docker worker auto-sizing
+DOCKER_WORKER_MEMORY = "6g"             # Memory limit per Docker worker container
+DOCKER_WORKER_CPUS = "2"                # CPU limit per Docker worker container
+
+
 def available_vcpu_count() -> int:
     try:
         if hasattr(os, "sched_getaffinity"):
@@ -79,14 +86,23 @@ def available_vcpu_count() -> int:
     return 1
 
 
+def cpus_per_docker_worker() -> int:
+    """Integer CPUs each docker worker is sized for, derived from DOCKER_WORKER_CPUS."""
+    try:
+        return max(1, int(float(DOCKER_WORKER_CPUS)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def default_docker_worker_count(*, maximum: int = 12) -> int:
-    return max(1, min(int(maximum), available_vcpu_count()))
+    """Number of docker workers that fit on this host without CPU oversubscription."""
+    return max(1, min(int(maximum), available_vcpu_count() // cpus_per_docker_worker()))
 
 
-# Docker parallel workers for validator and benchmark evaluation
-N_DOCKER_WORKERS = default_docker_worker_count(maximum=12)  # One worker per vCPU, capped at 12
-DOCKER_WORKER_MEMORY = "6g"             # Memory limit per Docker worker container
-DOCKER_WORKER_CPUS = "2"                # CPU limit per Docker worker container
+# Docker parallel workers for validator and benchmark evaluation.
+# One worker per `DOCKER_WORKER_CPUS` vCPUs so each worker can be pinned to a
+# dedicated CPU group; capped at 12 workers.
+N_DOCKER_WORKERS = default_docker_worker_count(maximum=12)
 
 # Docker pip package whitelist (approved packages for miner requirements.txt)
 DOCKER_PIP_WHITELIST = {
@@ -212,6 +228,13 @@ REWARD_W_TIME = 0.45                    # Weight for time efficiency term in rew
 REWARD_W_SAFETY = 0.10                  # Weight for safety term in reward calculation
 SAFETY_DISTANCE_SAFE = 1.0              # Full safety score at this clearance (meters)
 SAFETY_DISTANCE_DANGER = 0.2            # Zero safety score at this clearance (meters)
+
+# Landing-zone floor suppression: ignore the supporting floor right under a
+# legitimately low landing platform so the final descent is not penalized for
+# unavoidable proximity to the ground.
+LANDING_FLOOR_MAX_HEIGHT = 0.15         # Max AABB z-extent treated as floor (meters)
+LANDING_COLUMN_PADDING = 0.10           # XY padding around landing radius (meters)
+LANDING_ALTITUDE_BUFFER = 0.10          # Vertical slack above safe distance (meters)
 
 # =============================================================================
 # BENCHMARK SYSTEM
@@ -349,6 +372,12 @@ TYPE_6_H_MIN, TYPE_6_H_MAX = 0.2, 3.0
 TYPE_6_START_H_MIN, TYPE_6_START_H_MAX = 0.2, 3.0
 TYPE_6_HORIZON = HORIZON_SEC
 TYPE_6_SAFETY_DISTANCE_SAFE = 0.6                   # Tighter safety for dense forest (meters)
+
+# Per-challenge override for SAFETY_DISTANCE_SAFE; types not present fall back
+# to the global value.
+SAFETY_DISTANCE_SAFE_BY_TYPE = {
+    6: TYPE_6_SAFETY_DISTANCE_SAFE,
+}
 
 FOREST_MODE_DISTRIBUTION = {
     1: 0.25,   # Normal (green foliage)
