@@ -1,0 +1,32 @@
+seed: 2
+total_timesteps: 200000
+
+optuna:
+  n_trials: 25
+  n_timesteps_per_trial: 150000
+  n_eval_episodes: 12
+  study_name: swarm_ppo_hpo
+  storage: null
+
+ppo:
+  learning_rate: 0.0003
+  gamma: 0.995
+  n_steps: 2048
+  batch_size: 512
+
+policy:
+  policy_type: custom
+
+vec_env:
+  n_envs: 4
+
+evaluation:
+  metrics_weights:
+    success_rate: 0.35
+    collision_rate: -0.25
+    smoothness: 0.15
+    mean_reward: 0.15
+    path_efficiency: 0.10
+
+checkpoint:
+  dir: ./RL/train_scripts/checkpoints/hpo/

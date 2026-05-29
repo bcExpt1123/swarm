@@ -1,0 +1,90 @@
+seed: 2
+total_timesteps: 500000
+device: auto
+
+reward:
+  use_env_reward: true
+  env_reward_scale: 1.0
+  goal_progress: 0.5
+  collision: -3.0
+  obstacle_proximity: -0.3
+  hover_stability: 0.2
+  smooth_action: -0.03
+  angular_velocity: -0.01
+  alive: 0.005
+  energy: -0.01
+
+curriculum:
+  enabled: true
+  auto_advance: true
+  randomize_env_params: true
+  stages:
+    - name: hover_easy
+      challenge_types: [1]
+      min_success_rate: 0.15
+      min_episodes: 30
+      eval_episodes: 15
+      moving_platform_prob: 0.0
+    - name: waypoint
+      challenge_types: [1, 2]
+      min_success_rate: 0.20
+      min_episodes: 40
+      eval_episodes: 20
+    - name: village
+      challenge_types: [3, 4]
+      min_success_rate: 0.18
+      min_episodes: 50
+      eval_episodes: 25
+      moving_platform_prob: 0.1
+
+ppo:
+  learning_rate: 0.0003
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.005
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  n_steps: 4096
+  batch_size: 512
+  n_epochs: 10
+
+policy:
+  policy_type: custom
+  features_dim: 96
+  pi_layers: [128, 64, 32, 16]
+  vf_layers: [128, 64, 32, 16]
+  log_std_init: -1.8
+
+vec_env:
+  n_envs: 4
+  subproc: false
+  norm_obs: true
+  norm_reward: true
+  clip_obs: 10.0
+
+logging:
+  # SB3 writes files here only — start the web UI separately: tensorboard --logdir RL/train_scripts/logs/pretrain/
+  tensorboard_dir: ./RL/train_scripts/logs/pretrain/
+  tensorboard_write_events: true
+  wandb_enabled: false
+  wandb_project: swarm-drone-rl
+
+# Optional: set when using --skip-bc (else auto-detects bc_pretrain.zip)
+# resume_path: ./RL/train_scripts/checkpoints/pretrain/bc_pretrain.zip
+
+checkpoint:
+  dir: ./RL/train_scripts/checkpoints/pretrain/
+  freq: 250000
+  submission_output: ppo_policy
+
+evaluation:
+  eval_freq: 100000
+  n_episodes: 10
+
+bc:
+  collect_episodes: 40
+  max_steps_per_episode: 1024
+  train_steps: 80
+  bc_lr: 0.0001
+  batch_size: 512

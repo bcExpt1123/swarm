@@ -64,7 +64,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from imitation.data import rollout, serialize
+from imitation.data import rollout
+
+from RL.framework.data.expert_data import load_trajectories, save_trajectories
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.util.networks import RunningNorm
 from torch.optim import Adam
@@ -126,7 +128,7 @@ def load_or_sample_demonstrations(
 ):
     if expert_pickle.is_file():
         print(f"Loading cached demonstrations from {expert_pickle}")
-        return serialize.load(str(expert_pickle))
+        return load_trajectories(expert_pickle)
 
     if not pretrain_path.is_file():
         raise FileNotFoundError(
@@ -144,7 +146,7 @@ def load_or_sample_demonstrations(
     )
     if save_demo_path is not None:
         save_demo_path.parent.mkdir(parents=True, exist_ok=True)
-        serialize.save(str(save_demo_path), demos)
+        save_trajectories(save_demo_path, demos)
         print(f"Wrote demonstrations to {save_demo_path}")
     return demos
 

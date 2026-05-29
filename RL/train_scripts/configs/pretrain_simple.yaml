@@ -1,0 +1,76 @@
+# Simple: hover / basic stability (challenge type 1). Matches RL/learning.md "Simple".
+seed: 2
+total_timesteps: 300000
+device: auto
+
+reward:
+  use_env_reward: true
+  env_reward_scale: 1.0
+  goal_progress: 0
+  collision: 0
+  obstacle_proximity: 0
+  hover_stability: 0
+  smooth_action: 0
+  angular_velocity: 0
+  alive: 0
+  energy: 0
+
+curriculum:
+  enabled: true
+  auto_advance: true
+  randomize_env_params: true
+  stages:
+    - name: type1_easy
+      challenge_types: [1]
+      min_success_rate: 0.20
+      min_episodes: 30
+      eval_episodes: 10
+      moving_platform_prob: 0.0
+
+ppo:
+  learning_rate: 0.0003
+  gamma: 0.95
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: 0.1
+  ent_coef: 0.01
+  vf_coef: 0.15
+  max_grad_norm: 0.5
+  n_steps: 1024
+  batch_size: 512
+  n_epochs: 5
+
+policy:
+  policy_type: custom
+  features_dim: 96
+  log_std_init: -1.8
+
+vec_env:
+  n_envs: 4
+  subproc: false
+  norm_obs: true
+  norm_reward: true
+  clip_obs: 10.0
+
+logging:
+  tensorboard_dir: ./RL/train_scripts/logs/simple/pretrain/
+  tensorboard_write_events: true
+  wandb_enabled: false
+  wandb_project: swarm-drone-rl
+  wandb_run_name: pretrain_simple
+
+checkpoint:
+  dir: ./RL/train_scripts/checkpoints/simple/pretrain/
+  freq: 100000
+  submission_output: ppo_policy
+
+evaluation:
+  eval_freq: 50000
+  n_episodes: 10
+
+bc:
+  collect_episodes: 40
+  max_steps_per_episode: 2048
+  train_steps: 80
+  bc_lr: 0.0002
+  batch_size: 512

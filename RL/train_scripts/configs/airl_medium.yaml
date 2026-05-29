@@ -1,0 +1,31 @@
+# AIRL after medium pretrain (RL/learning.md Medium).
+seed: 2
+device: auto
+
+airl:
+  expert_path: ./RL/train_scripts/expert/medium/expert_data.pkl
+  pretrain_path: ./RL/train_scripts/checkpoints/medium/pretrain/bc_pretrain.zip
+  min_expert_episodes: 24
+  rounds: 35
+  steps_per_round: 12000
+  demo_batch_size: 512
+  gen_replay_buffer_capacity: 2048
+  gen_train_timesteps: 500
+  n_disc_updates_per_round: 3
+  disc_lr: 0.00005
+  gen_lr: 0.00005
+  log_std_boost: 0.0
+  reward_dir: ./RL/train_scripts/checkpoints/medium/airl/reward
+  policy_dir: ./RL/train_scripts/checkpoints/medium/airl/policy
+
+policy:
+  policy_type: custom
+  features_dim: 96
+  log_std_init: -2.7
+
+vec_env:
+  n_envs: 1
+  gui: false
+
+logging:
+  tensorboard_dir: ./RL/train_scripts/logs/medium/airl/

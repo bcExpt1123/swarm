@@ -1,0 +1,76 @@
+# PPO fine-tune: medium. Matches RL/learning.md Medium ppo_train.
+seed: 2
+total_timesteps: 1500000
+device: auto
+resume_path: ./RL/train_scripts/checkpoints/medium/airl/policy/ppo_policy_35.zip
+
+reward:
+  use_env_reward: true
+  env_reward_scale: 1.0
+  goal_progress: 0
+  collision: 0
+  obstacle_proximity: 0
+  hover_stability: 0
+  smooth_action: 0
+  angular_velocity: 0
+  alive: 0
+  energy: 0
+
+curriculum:
+  enabled: true
+  auto_advance: true
+  stages:
+    - name: type1_2
+      challenge_types: [1, 2]
+      min_success_rate: 0.20
+      min_episodes: 50
+      eval_episodes: 15
+      moving_platform_prob: 0.05
+    - name: type3_4
+      challenge_types: [3, 4]
+      min_success_rate: 0.22
+      min_episodes: 60
+      eval_episodes: 20
+      moving_platform_prob: 0.10
+
+ppo:
+  learning_rate: 0.0003
+  lr_end: 0.00005
+  gamma: 0.97
+  gae_lambda: 0.95
+  clip_range: 0.15
+  clip_range_vf: 0.1
+  ent_coef: 0.002
+  vf_coef: 0.15
+  max_grad_norm: 0.5
+  n_steps: 2048
+  batch_size: 1024
+  n_epochs: 8
+
+policy:
+  policy_type: custom
+  features_dim: 96
+  log_std_init: -1.8
+
+vec_env:
+  n_envs: 6
+  subproc: false
+  norm_obs: false
+  norm_reward: false
+  clip_obs: 10.0
+
+logging:
+  tensorboard_dir: ./RL/train_scripts/logs/medium/finetune/
+  tensorboard_write_events: true
+  wandb_enabled: false
+  wandb_project: swarm-drone-rl
+  wandb_run_name: finetune_medium
+
+checkpoint:
+  dir: ./RL/train_scripts/checkpoints/medium/finetune/
+  freq: 250000
+  submission_output: ppo_policy
+
+evaluation:
+  eval_freq: 100000
+  n_episodes: 25

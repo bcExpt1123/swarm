@@ -1,0 +1,31 @@
+# AIRL after hard pretrain (RL/learning.md Hard).
+seed: 2
+device: auto
+
+airl:
+  expert_path: ./RL/train_scripts/expert/hard/expert_data.pkl
+  pretrain_path: ./RL/train_scripts/checkpoints/hard/pretrain/bc_pretrain.zip
+  min_expert_episodes: 50
+  rounds: 50
+  steps_per_round: 15000
+  demo_batch_size: 512
+  gen_replay_buffer_capacity: 4096
+  gen_train_timesteps: 800
+  n_disc_updates_per_round: 4
+  disc_lr: 0.00003
+  gen_lr: 0.00003
+  log_std_boost: 0.0
+  reward_dir: ./RL/train_scripts/checkpoints/hard/airl/reward
+  policy_dir: ./RL/train_scripts/checkpoints/hard/airl/policy
+
+policy:
+  policy_type: custom
+  features_dim: 96
+  log_std_init: -2.7
+
+vec_env:
+  n_envs: 1
+  gui: false
+
+logging:
+  tensorboard_dir: ./RL/train_scripts/logs/hard/airl/

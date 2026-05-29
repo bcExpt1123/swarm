@@ -1,0 +1,12 @@
+# Modular shaping weights (used when reward.use_env_reward is false or for extra terms)
+reward:
+  use_env_reward: true
+  env_reward_scale: 1.0
+  goal_progress: 1.0
+  collision: -5.0
+  obstacle_proximity: -0.5
+  hover_stability: 0.3
+  smooth_action: -0.05
+  angular_velocity: -0.02
+  alive: 0.01
+  energy: -0.02

@@ -1,0 +1,5 @@
+# Extra dependencies for RL/train_scripts (install atop repo requirements.txt)
+pyyaml>=6.0
+optuna>=3.5
+imitation>=1.0.0
+sb3-contrib>=2.7.0

@@ -1,0 +1,82 @@
+# Medium: waypoint / mild dynamics. Matches RL/learning.md "Medium".
+seed: 2
+total_timesteps: 800000
+device: auto
+
+reward:
+  use_env_reward: true
+  env_reward_scale: 1.0
+  goal_progress: 0
+  collision: 0
+  obstacle_proximity: 0
+  hover_stability: 0
+  smooth_action: 0
+  angular_velocity: 0
+  alive: 0
+  energy: 0
+
+curriculum:
+  enabled: true
+  auto_advance: true
+  randomize_env_params: true
+  stages:
+    - name: type1
+      challenge_types: [1]
+      min_success_rate: 0.18
+      min_episodes: 40
+      eval_episodes: 12
+      moving_platform_prob: 0.0
+    - name: type2
+      challenge_types: [1, 2]
+      min_success_rate: 0.20
+      min_episodes: 50
+      eval_episodes: 15
+      moving_platform_prob: 0.05
+
+ppo:
+  learning_rate: 0.0003
+  gamma: 0.97
+  gae_lambda: 0.95
+  clip_range: 0.15
+  clip_range_vf: 0.1
+  ent_coef: 0.005
+  vf_coef: 0.15
+  max_grad_norm: 0.5
+  n_steps: 2048
+  batch_size: 1024
+  n_epochs: 8
+
+policy:
+  policy_type: custom
+  features_dim: 96
+  log_std_init: -1.8
+
+vec_env:
+  n_envs: 6
+  subproc: false
+  norm_obs: true
+  norm_reward: true
+  clip_obs: 10.0
+
+logging:
+  tensorboard_dir: ./RL/train_scripts/logs/medium/pretrain/
+  tensorboard_write_events: true
+  wandb_enabled: false
+  wandb_project: swarm-drone-rl
+  wandb_run_name: pretrain_medium
+
+checkpoint:
+  dir: ./RL/train_scripts/checkpoints/medium/pretrain/
+  freq: 250000
+  submission_output: ppo_policy
+
+evaluation:
+  eval_freq: 100000
+  n_episodes: 15
+
+bc:
+  collect_episodes: 100
+  max_steps_per_episode: 3072
+  train_steps: 150
+  bc_lr: 0.0001
+  batch_size: 1024

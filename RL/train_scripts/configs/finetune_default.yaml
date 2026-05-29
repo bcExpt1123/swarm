@@ -1,0 +1,62 @@
+seed: 2
+total_timesteps: 3000000
+device: auto
+resume_path: ./RL/train_scripts/checkpoints/pretrain/ppo_policy.zip
+
+reward:
+  use_env_reward: true
+  env_reward_scale: 1.0
+
+curriculum:
+  enabled: true
+  stages:
+    - name: mixed
+      challenge_types: [1, 2, 3, 4, 5, 6]
+      min_success_rate: 0.22
+      min_episodes: 60
+      eval_episodes: 30
+      moving_platform_prob: 0.15
+    - name: hard
+      challenge_types: [3, 4, 5, 6]
+      min_success_rate: 0.28
+      min_episodes: 80
+      eval_episodes: 40
+      moving_platform_prob: 0.25
+
+ppo:
+  learning_rate: 0.0002
+  lr_end: 0.00003
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.12
+  clip_range_vf: 0.1
+  ent_coef: 0.004
+  vf_coef: 0.15
+  max_grad_norm: 0.3
+  n_steps: 4096
+  batch_size: 1024
+  n_epochs: 8
+
+policy:
+  policy_type: custom
+  features_dim: 96
+
+vec_env:
+  n_envs: 8
+  norm_obs: false
+  norm_reward: false
+
+logging:
+  tensorboard_dir: ./RL/train_scripts/logs/finetune/
+  wandb_enabled: true
+  wandb_project: swarm-drone-rl
+  wandb_run_name: finetune
+
+checkpoint:
+  dir: ./RL/train_scripts/checkpoints/finetune/
+  freq: 500000
+  submission_output: ppo_policy
+
+evaluation:
+  eval_freq: 100000
+  n_episodes: 50

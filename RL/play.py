@@ -3,13 +3,22 @@
 """
 python RL/play.py --model_path=swarm/submission_template/ppo_policy.zip --seed=2
 python RL/play.py --model_path=checkpoints/ppo_swarm_2/ppo_swarm_1000000_steps.zip --seed=2
+python RL/play.py --model_path=train_scripts/checkpoints/pretrain/bc_pretrain.zip --seed=2
 """
 
 import argparse
+import sys
 from pathlib import Path
-from datetime import datetime
+
+# Repo root on path before SB3 unpickles (checkpoints reference RL.* / customnetwork).
+_RL_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _RL_DIR.parent
+for _p in (_REPO_ROOT, _RL_DIR):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
+
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from swarm.utils.env_factory import make_env
 from swarm.validator.task_gen import random_task
@@ -23,15 +32,75 @@ torch.set_num_threads(10)
 
 show_rgb_camera = False
 
+
+def resolve_model_zip(raw_path: str) -> Path:
+    """Find a .zip checkpoint; SB3.load expects path *without* .zip suffix."""
+    raw = Path(raw_path)
+    search_roots = [
+        Path.cwd(),
+        _RL_DIR,
+        _REPO_ROOT,
+        _RL_DIR / "train_scripts",
+    ]
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        for root in search_roots:
+            candidates.append(root / raw)
+    # Also try common typo pre_train -> pretrain
+    extra = []
+    for c in candidates:
+        s = str(c).replace("pre_train", "pretrain")
+        if s != str(c):
+            extra.append(Path(s))
+    candidates.extend(extra)
+
+    seen: set[Path] = set()
+    for c in candidates:
+        c = c.resolve()
+        if c in seen:
+            continue
+        seen.add(c)
+        if c.is_file() and c.suffix.lower() == ".zip":
+            return c
+        alt = c.with_suffix(".zip")
+        if alt.is_file():
+            return alt
+    tried = "\n".join(f"  - {p}" for p in sorted(seen))
+    raise FileNotFoundError(
+        f"Model checkpoint not found for '{raw_path}'.\n"
+        f"Searched:\n{tried}\n"
+        "Tip: use forward slashes and check folder name (pretrain vs pre_train)."
+    )
+
+
+def load_ppo_model(zip_path: Path) -> PPO:
+    """Load PPO for inference only (no full training rollout buffer)."""
+    # Policies trained with RL.framework use custom CNN; must be importable when unpickling.
+    import customnetwork  # noqa: F401
+
+    stem = zip_path.with_suffix("")
+    print(f"Loading policy: {stem}.zip", flush=True)
+    # Saved checkpoints use n_steps=2048, n_envs=8 → large rollout buffer on load.
+    # Play only needs predict(); minimal buffer avoids ArrayMemoryError with GUI open.
+    return PPO.load(
+        str(stem),
+        custom_objects={"n_steps": 1, "n_envs": 1},
+        load_optimizer=False,
+    )
+
+
 def main(seed, model_path="swarm/submission_template/ppo_policy.zip"):
     task = random_task(sim_dt=SIM_DT, seed=seed)
+    model_zip = resolve_model_zip(model_path)
+    model = load_ppo_model(model_zip)
+
     env = make_env(task, gui=True)
     # BaseRLAviary may enable GUI sliders / RPM debug when gui=True; that ignores
     # the policy and looks like "drone never leaves start". Tests use the same off-switch.
     env.USER_DEBUG = False
     env.USE_GUI_RPM = False
-
-    model = PPO.load(model_path)
     obs, _ = env.reset(seed=task.map_seed)
     t_sim = 0.0
     act_lo = env.action_space.low.flatten()
